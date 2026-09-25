@@ -161,7 +161,8 @@ function extensionFor(url,blob){
  return ".jpg";
 }
 async function saveUrlNamed(dir,url,baseName){
- const proxyUrl="https://divine-wave-3532.marcel-niederer.workers.dev/?url="+encodeURIComponent(url);\n const res=await fetch(proxyUrl,{mode:"cors"});
+ const proxyUrl="https://divine-wave-3532.marcel-niederer.workers.dev/?url="+encodeURIComponent(url);
+ const res=await fetch(proxyUrl,{mode:"cors"});
  if(!res.ok)throw new Error(`HTTP ${res.status}`);
  const blob=await res.blob();
  const name=baseName+extensionFor(url,blob);

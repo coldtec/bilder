@@ -21,7 +21,7 @@
 </style>
 </head>
 <body><div class="wrap">
-<div class="hero"><div class="eyebrow">COLDTEC TOOL</div><h1>SECOMP Medien</h1><p>Bilder und Energielabel automatisch in den Bilderordner des richtigen Artikels speichern.</p></div>
+<div class="hero"><div class="eyebrow">COLDTEC TOOL</div><h1>SECOMP Medien</h1><p>Bilder, Energielabel und Betriebsanleitungen automatisch in die passenden Artikelordner speichern.</p></div>
 
 <div class="card">
  <div class="step"><div class="num">1</div><h2>Dateien hineinziehen</h2></div>
@@ -36,7 +36,7 @@
 </div>
 
 <div class="card">
- <div class="step"><div class="num">3</div><h2>Prüfen und herunterladen</h2></div>
+ <div class="step"><div class="num">3</div><h2>Prüfen und speichern</h2></div>
  <div class="row"><button id="check" class="secondary" disabled>Ordner prüfen</button><button id="run" disabled>Medien speichern</button></div>
  <div id="status" class="status">Warte auf Dateien und Hauptordner.</div>
  <div id="log" class="log" style="display:none"></div>
@@ -52,7 +52,7 @@
 const REQUIRED=["GPKat_Nr.xlsx","MediaData_secomp.csv"];
 const files=new Map(); let rootHandle=null, plan=[], checked=false;
 const S=x=>String(x??"").trim();
-function normProvider(v){let d=S(v).replace(/\D/g,""); d=d.replace(/^0+/,""); return d}
+function normProvider(v){return S(v).replace(/\D/g,"").replace(/^0+/,"")}
 function log(msg,cls=""){const el=document.getElementById("log");el.style.display="block";let d=document.createElement("div");d.textContent=msg;d.className=cls;el.appendChild(d)}
 function clearLog(){document.getElementById("log").innerHTML="";document.getElementById("log").style.display="none"}
 function status(msg,kind=""){let e=document.getElementById("status");e.textContent=msg;e.className="status "+kind}
@@ -62,9 +62,17 @@ function render(){
  document.getElementById("run").disabled=!checked;
 }
 const drop=document.getElementById("drop"),pick=document.getElementById("pick");
-drop.onclick=()=>pick.click();drop.ondragover=e=>{e.preventDefault();drop.classList.add("over")};drop.ondragleave=()=>drop.classList.remove("over");
+drop.onclick=e=>{if(e.target!==pick)pick.click()};pick.onclick=e=>e.stopPropagation();drop.ondragover=e=>{e.preventDefault();drop.classList.add("over")};drop.ondragleave=()=>drop.classList.remove("over");
 drop.ondrop=e=>{e.preventDefault();drop.classList.remove("over");addFiles(e.dataTransfer.files)};pick.onchange=()=>addFiles(pick.files);
-function addFiles(fs){[...fs].forEach(f=>files.set(f.name,f));checked=false;render()}
+function addFiles(fs){
+ for(const f of fs){
+  let canonical=null;
+  if(/^GPKat_Nr(?:\(\d+\))?\.xlsx$/i.test(f.name))canonical="GPKat_Nr.xlsx";
+  if(/^MediaData_secomp(?:\(\d+\))?\.csv$/i.test(f.name))canonical="MediaData_secomp.csv";
+  if(canonical)files.set(canonical,f);
+ }
+ pick.value="";checked=false;render();status("Dateien ausgewählt. Jetzt Hauptordner auswählen und prüfen.");
+}
 document.getElementById("chooseFolder").onclick=async()=>{
  try{
   if(!window.showDirectoryPicker) throw new Error("Dieser Browser unterstützt die Ordnerauswahl nicht. Bitte Chrome oder Edge über HTTPS verwenden.");
@@ -74,18 +82,38 @@ document.getElementById("chooseFolder").onclick=async()=>{
  }catch(e){if(e.name!=="AbortError")status("FEHLER: "+e.message,"bad")}
 };
 
+// CSV-Parser: erkennt Semikolon, Anfuehrungszeichen und Zeilenumbrueche in Feldern.
+function parseSemicolonCSV(text){
+ const rows=[];let row=[],field="",quoted=false;
+ text=text.replace(/^\uFEFF/,"");
+ for(let i=0;i<text.length;i++){
+  const c=text[i];
+  if(c==='"'){
+   if(quoted&&text[i+1]==='"'){field+='"';i++}else quoted=!quoted;
+  }else if(c===';'&&!quoted){row.push(field);field=""}
+  else if((c==='\n'||c==='\r')&&!quoted){
+   if(c==='\r'&&text[i+1]==='\n')i++;
+   row.push(field);if(row.some(x=>x!==""))rows.push(row);row=[];field="";
+  }else field+=c;
+ }
+ row.push(field);if(row.some(x=>x!==""))rows.push(row);
+ const headers=(rows.shift()||[]).map(x=>x.trim());
+ if(!headers.includes("ProviderKey"))throw new Error("CSV-Spalte ProviderKey nicht gefunden. Header: "+headers.join(", "));
+ return rows.map(values=>Object.fromEntries(headers.map((h,i)=>[h,values[i]||""])));
+}
+
 async function readInputs(){
  const xbuf=await files.get("GPKat_Nr.xlsx").arrayBuffer(), wb=XLSX.read(xbuf,{type:"array"});
  const arr=XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{header:1,defval:"",raw:false});
  const mapping=new Map();
  for(const row of arr){
-  const article=S(row[0]), provider=normProvider(row[1]);
+  const article=S(row[0]), provider=normProvider(row[2]);
   if(!article||!provider||!/\d/.test(article)) continue;
   if(!mapping.has(provider))mapping.set(provider,[]);
   if(!mapping.get(provider).includes(article))mapping.get(provider).push(article);
  }
  const text=await files.get("MediaData_secomp.csv").text();
- const mwb=XLSX.read(text,{type:"string",FS:";"}), media=XLSX.utils.sheet_to_json(mwb.Sheets[mwb.SheetNames[0]],{defval:"",raw:false});
+ const media=parseSemicolonCSV(text);
  return {mapping,media};
 }
 async function existingDir(parent,name){
@@ -114,21 +142,29 @@ async function findArticleDirInGroups(root, article){
 }
 
 function mediaItems(row){
- let a=[];
- if(S(row.MainImageURL))a.push({kind:"image",url:S(row.MainImageURL)});
- for(let i=1;i<=6;i++){let u=S(row["ImageURL_pim_"+i]);if(u)a.push({kind:"image",url:u})}
- if(S(row.EnergyLabel))a.push({kind:"energy",url:S(row.EnergyLabel)});
- return a;
+  const items=[];
+  // Ausschliesslich der Header entscheidet über die Zuordnung.
+  for(const [header,value] of Object.entries(row)){
+    const url=S(value);
+    if(!url)continue;
+    if(header==="MainImageURL" || header.startsWith("ImageURL")) items.push({kind:"image",url});
+    else if(header.startsWith("EnergyLabel")) items.push({kind:"energy",url});
+    else if(header.startsWith("DocumentURL")) items.push({kind:"document",url});
+  }
+  // Hauptbild immer zuerst, anschliessend weitere Bilder in Spaltenreihenfolge.
+  items.sort((a,b)=> (a.kind==="image"?0:a.kind==="energy"?1:2)-(b.kind==="image"?0:b.kind==="energy"?1:2));
+  return items;
 }
 function basename(url,fallback){try{let n=decodeURIComponent(new URL(url).pathname.split("/").pop());return n||fallback}catch{return fallback}}
 document.getElementById("check").onclick=async()=>{
  try{
   checked=false;plan=[];clearLog();document.getElementById("done").classList.remove("show");status("Zuordnung und Ordner werden geprüft …");
-  const {mapping,media}=await readInputs();let relevant=0,errors=0,noMap=0;
+  const {mapping,media}=await readInputs();let relevant=0,errors=0,noMap=0,matchedKeys=0;
   for(const row of media){
    const pk=normProvider(row.ProviderKey), arts=mapping.get(pk)||[], items=mediaItems(row);
    if(!items.length)continue;
    if(!arts.length){noMap++;log(`⚠ ProviderKey ${S(row.ProviderKey)}: keine Artikelnummer gefunden`,"warntxt");continue}
+   matchedKeys++;
    for(const article of arts){
     relevant++;
     const articleDir=await findArticleDirInGroups(rootHandle,article);
@@ -136,14 +172,17 @@ document.getElementById("check").onclick=async()=>{
     const bilder=await existingDir(articleDir,"Bilder");
     if(!bilder){errors++;log(`✗ ${article}: Unterordner "Bilder" fehlt`,"badtxt");continue}
     const needsEnergy=items.some(x=>x.kind==="energy");
-    plan.push({article,bilder,items});
-    log(`✓ ${article}: Ordnerstruktur OK (${items.filter(x=>x.kind==="image").length} Bilder${needsEnergy?" + Energielabel":""})`,"goodtxt");
+    const needsDocs=items.some(x=>x.kind==="document");
+    const docs=needsDocs?await existingDir(articleDir,"Betriebsanleitung"):null;
+    if(needsDocs&&!docs){errors++;log(`✗ ${article}: Unterordner "Betriebsanleitung" fehlt`,"badtxt");continue}
+    plan.push({article,bilder,docs,items});
+    log(`✓ ${article}: Ordnerstruktur OK (${items.filter(x=>x.kind==="image").length} Bilder${needsEnergy?" + Energielabel":""}${needsDocs?" + "+items.filter(x=>x.kind==="document").length+" Dokument(e)":""})`,"goodtxt");
    }
   }
   checked=plan.length>0;render();
   if(errors)status(`Prüfung abgeschlossen: ${plan.length} Artikel bereit, ${errors} Ordnerfehler. Fehlerhafte Artikel werden NICHT verändert.`,"warn");
   else status(`Prüfung abgeschlossen: ${plan.length} Artikel bereit. Keine Ordnerfehler gefunden.`,"good");
-  if(noMap)status(document.getElementById("status").textContent+`\n${noMap} ProviderKeys ohne Zuordnung.`,"warn");
+  status(document.getElementById("status").textContent+`\n${matchedKeys} ProviderKeys zugeordnet, ${noMap} ohne Zuordnung.`,errors||noMap?"warn":"good");
  }catch(e){console.error(e);status("FEHLER: "+e.message,"bad")}
 };
 
@@ -160,12 +199,12 @@ function extensionFor(url,blob){
  if(t.includes("jpeg")||t.includes("jpg"))return ".jpg";
  return ".jpg";
 }
-async function saveUrlNamed(dir,url,baseName){
- const proxyUrl="https://divine-wave-3532.marcel-niederer.workers.dev/?url="+encodeURIComponent(url);
+async function saveUrlNamed(dir,url,baseName,forcedExtension=null){
+ const proxyUrl="https\://divine-wave-3532.marcel-niederer.workers.dev/?url="+encodeURIComponent(url);
  const res=await fetch(proxyUrl,{mode:"cors"});
  if(!res.ok)throw new Error(`HTTP ${res.status}`);
  const blob=await res.blob();
- const name=baseName+extensionFor(url,blob);
+ const name=baseName+(forcedExtension||extensionFor(url,blob));
  const fh=await dir.getFileHandle(name,{create:true}), w=await fh.createWritable();
  await w.write(blob);await w.close();return name;
 }
@@ -175,23 +214,28 @@ document.getElementById("run").onclick=async()=>{
   let okFiles=0,failFiles=0,okArticles=0;
   status("Medien werden heruntergeladen und gespeichert …");
   for(const p of plan){
-   let articleOk=true,imageNo=0;
-   for(const item of p.items){
-    try{
-     let desired;
-     if(item.kind==="image"){
-       imageNo++;
-       desired=`${p.article}_${imageNo}`;
-     }else{
-       desired=`${p.article}_Energielabel`;
-     }
-     const name=await saveUrlNamed(p.bilder,item.url,desired);
-     okFiles++;log(`✓ ${p.article} → Bilder\\${name}`,"goodtxt");
-    }catch(e){
-     articleOk=false;failFiles++;log(`✗ ${p.article}: Download fehlgeschlagen – ${item.url} (${e.message})`,"badtxt");
+       let articleOk=true,imageNo=0,docNo=0;
+    const docCount=p.items.filter(x=>x.kind==="document").length;
+    for(const item of p.items){
+      try{
+        let desired,dir=p.bilder;
+        if(item.kind==="image"){
+          imageNo++;
+          desired=`${p.article}_${imageNo}`;
+        }else if(item.kind==="energy"){
+          desired=`${p.article}_Energielabel`;
+        }else{
+          docNo++;
+          dir=p.docs;
+          desired=`${p.article}_Betriebsanleitung${docCount>1?"_"+docNo:""}`;
+        }
+        const name=await saveUrlNamed(dir,item.url,desired,item.kind==="document"?".pdf":null);
+        okFiles++;log(`✓ ${p.article} → ${item.kind==="document"?"Betriebsanleitung":"Bilder"}\\${name}`,"goodtxt");
+      }catch(e){
+        articleOk=false;failFiles++;log(`✗ ${p.article}: Download fehlgeschlagen – ${item.url} (${e.message})`,"badtxt");
+      }
     }
-   }
-   if(articleOk)okArticles++;
+if(articleOk)okArticles++;
   }
   document.getElementById("summary").textContent=`${okArticles} Artikel vollständig verarbeitet · ${okFiles} Dateien gespeichert${failFiles?` · ${failFiles} Downloads fehlgeschlagen`:""}.`;
   document.getElementById("done").classList.add("show");
